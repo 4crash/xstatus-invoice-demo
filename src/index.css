@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Tailwind v4 theme tokens */
+@theme {
+  --color-accent: #aa3bff;
+  --color-accent-dark: #c084fc;
+}
+
+/* Minimal global resets */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

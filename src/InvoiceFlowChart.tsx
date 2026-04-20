@@ -1,13 +1,14 @@
-import { useCallback, useMemo, useState } from 'react'
-import ReactFlow, {
+import {
     applyNodeChanges,
     Background,
     Controls,
+    ReactFlow,
     type Edge,
     type Node,
     type NodeChange,
-} from 'reactflow'
-import 'reactflow/dist/style.css'
+} from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
+import { useCallback, useMemo, useState } from 'react'
 import { REQUIRED_VOTES } from './invoiceMachine'
 
 const STATE_CONFIG: Record<string, { label: string; color: string }> = {

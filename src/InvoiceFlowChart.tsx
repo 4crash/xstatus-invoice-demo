@@ -8,74 +8,77 @@ import {
     type NodeChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useCallback, useMemo, useState } from 'react'
-import { REQUIRED_VOTES } from './invoiceMachine'
-
-const STATE_CONFIG: Record<string, { label: string; color: string }> = {
-    draft: { label: 'Draft', color: '#475569' },
-    pending_review: { label: 'Pending Review', color: '#b45309' },
-    approved: { label: 'Approved', color: '#15803d' },
-    paid: { label: 'Paid', color: '#1d4ed8' },
-}
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { DEFAULT_WORKFLOW_DEFINITION, type WorkflowDefinition } from './workflowSchema'
 
 interface Props {
     currentState: string
     votes: string[]
+    /** Full workflow definition. Defaults to the hardcoded invoice machine. */
+    definition?: WorkflowDefinition
+    /**
+     * Called whenever node positions change (drag, etc.).
+     * Parent stores this for serialization when saving.
+     */
+    onPositionsChange?: (positions: Record<string, { x: number; y: number }>) => void
 }
 
-const initialNodes: Node[] = [
-    { id: 'draft', position: { x: 30, y: 80 }, data: { label: 'Draft' } },
-    { id: 'pending_review', position: { x: 230, y: 80 }, data: { label: 'Pending Review' } },
-    { id: 'approved', position: { x: 470, y: 80 }, data: { label: 'Approved' } },
-    { id: 'paid', position: { x: 680, y: 80 }, data: { label: 'Paid' } },
-]
-
-const edges: Edge[] = [
-    {
-        id: 'e-submit',
-        source: 'draft', target: 'pending_review',
-        label: 'SUBMIT\n(Accountant)',
-        animated: true,
-    },
-    {
-        id: 'e-approve',
-        source: 'pending_review', target: 'approved',
-        label: `VOTE ×${REQUIRED_VOTES}\n(Mgr / CFO)`,
-        animated: true,
-    },
-    {
-        id: 'e-reject',
-        source: 'pending_review', target: 'draft',
-        label: 'REJECT',
-        animated: false,
-        type: 'step',
-        style: { stroke: '#ef4444' },
-        labelStyle: { fill: '#ef4444' },
-    },
-    {
-        id: 'e-pay',
-        source: 'approved', target: 'paid',
-        label: 'PAY\n(Accountant)',
-        animated: true,
-    },
-]
-
-export default function InvoiceFlowChart({ currentState, votes }: Props) {
-    const [nodes, setNodes] = useState<Node[]>(initialNodes)
-
-    const onNodesChange = useCallback(
-        (changes: NodeChange[]) => setNodes(nds => applyNodeChanges(changes, nds)),
-        [],
+export default function InvoiceFlowChart({
+    currentState,
+    votes,
+    definition = DEFAULT_WORKFLOW_DEFINITION,
+    onPositionsChange,
+}: Props) {
+    // Initialise nodes from the definition's stored positions.
+    const [nodes, setNodes] = useState<Node[]>(() =>
+        definition.states.map(s => ({
+            id: s.id,
+            position: s.position,
+            data: { label: s.label },
+        }))
     )
 
+    // When a new definition is loaded (e.g. after a DB load), reset positions.
+    useEffect(() => {
+        setNodes(
+            definition.states.map(s => ({
+                id: s.id,
+                position: s.position,
+                data: { label: s.label },
+            }))
+        )
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [definition.id, definition.states.length])
+
+    const onNodesChange = useCallback(
+        (changes: NodeChange[]) => {
+            setNodes(nds => {
+                const updated = applyNodeChanges(changes, nds)
+                onPositionsChange?.(
+                    Object.fromEntries(updated.map(n => [n.id, n.position]))
+                )
+                return updated
+            })
+        },
+        [onPositionsChange],
+    )
+
+    // Build a lookup: state id → definition metadata
+    const stateMap = useMemo(
+        () => Object.fromEntries(definition.states.map(s => [s.id, s])),
+        [definition.states],
+    )
+
+    // Apply active/inactive visual styling to each node.
     const coloredNodes = useMemo(
         () =>
             nodes.map(n => {
-                const cfg = STATE_CONFIG[n.id]
+                const cfg = stateMap[n.id]
+                if (!cfg) return n
                 const isActive = n.id === currentState
                 const label =
                     n.id === 'pending_review'
-                        ? `${cfg.label} (${votes.length}/${REQUIRED_VOTES})`
+                        ? `${cfg.label} (${votes.length}/${definition.requiredVotes})`
                         : cfg.label
 
                 return {
@@ -94,7 +97,23 @@ export default function InvoiceFlowChart({ currentState, votes }: Props) {
                     },
                 }
             }),
-        [nodes, currentState, votes],
+        [nodes, currentState, votes, stateMap, definition.requiredVotes],
+    )
+
+    // Derive edges from the definition's transitions.
+    const edges: Edge[] = useMemo(
+        () =>
+            definition.transitions.map(t => ({
+                id: t.id,
+                source: t.source,
+                target: t.target,
+                label: t.label,
+                animated: t.animated,
+                type: t.type,
+                style: t.style,
+                labelStyle: t.labelStyle,
+            })),
+        [definition.transitions],
     )
 
     return (

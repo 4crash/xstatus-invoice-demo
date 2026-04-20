@@ -1,0 +1,25 @@
+{
+    "name": "invoice-workflow-api",
+    "version": "1.0.0",
+    "description": "Express + PostgreSQL API for invoice workflow definitions",
+    "main": "dist/index.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "dev": "tsx watch src/index.ts"
+    },
+    "dependencies": {
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "pg": "^8.13.3"
+    },
+    "devDependencies": {
+        "@types/cors": "^2.8.17",
+        "@types/express": "^5.0.1",
+        "@types/node": "^22.14.1",
+        "@types/pg": "^8.11.11",
+        "tsx": "^4.19.3",
+        "typescript": "^5.8.3"
+    }
+}

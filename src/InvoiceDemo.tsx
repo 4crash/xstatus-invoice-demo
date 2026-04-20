@@ -1,5 +1,6 @@
 import { useMachine } from '@xstate/react'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
+import { getWorkflow, listWorkflows, saveWorkflow } from './api'
 import {
     hasAlreadyVoted,
     ROLE_COLORS,
@@ -10,7 +11,13 @@ import {
     type User,
 } from './guards'
 import InvoiceFlowChart from './InvoiceFlowChart'
-import { invoiceMachine, REQUIRED_VOTES } from './invoiceMachine'
+import { invoiceMachine } from './invoiceMachine'
+import {
+    applyPositions,
+    DEFAULT_WORKFLOW_DEFINITION,
+    type WorkflowDefinition,
+    type WorkflowListItem,
+} from './workflowSchema'
 
 // ─── Status badge styles ──────────────────────────────────────────────────────
 
@@ -35,6 +42,16 @@ export default function InvoiceDemo() {
     const [configOpen, setConfigOpen] = useState(false)
     const [state, send] = useMachine(invoiceMachine, { input: {} })
 
+    // ── Workflow persistence state ──────────────────────────────────────────
+    const [workflowDef, setWorkflowDef] = useState<WorkflowDefinition>(DEFAULT_WORKFLOW_DEFINITION)
+    const [workflowName, setWorkflowName] = useState('Invoice Approval')
+    const [nodePositions, setNodePositions] = useState<Record<string, { x: number; y: number }>>({})
+    const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+    const [loadOpen, setLoadOpen] = useState(false)
+    const [savedList, setSavedList] = useState<WorkflowListItem[]>([])
+    const [listLoading, setListLoading] = useState(false)
+    const [listError, setListError] = useState<string | null>(null)
+
     const current = state.value as string
     const { invoiceId, amount, vendor, votes, roleConfig } = state.context
     const activeUser: User = USERS.find(u => u.id === activeUserId)!
@@ -54,28 +71,132 @@ export default function InvoiceDemo() {
         send({ type: 'UPDATE_CONFIG', config: { [key]: next } })
     }
 
+    const handlePositionsChange = useCallback(
+        (positions: Record<string, { x: number; y: number }>) => setNodePositions(positions),
+        [],
+    )
+
+    async function handleSave() {
+        setSaveStatus('saving')
+        try {
+            const def = applyPositions(
+                { ...workflowDef, name: workflowName, roleConfig },
+                nodePositions,
+            )
+            const saved = await saveWorkflow(def)
+            setWorkflowDef(saved)
+            setSaveStatus('saved')
+            setTimeout(() => setSaveStatus('idle'), 2500)
+        } catch {
+            setSaveStatus('error')
+            setTimeout(() => setSaveStatus('idle'), 3000)
+        }
+    }
+
+    async function handleOpenLoad() {
+        setLoadOpen(true)
+        setListLoading(true)
+        setListError(null)
+        try {
+            setSavedList(await listWorkflows())
+        } catch (err) {
+            setListError(err instanceof Error ? err.message : 'Failed to load')
+        } finally {
+            setListLoading(false)
+        }
+    }
+
+    async function handleLoadItem(id: number) {
+        try {
+            const def = await getWorkflow(id)
+            setWorkflowDef(def)
+            setWorkflowName(def.name)
+            send({ type: 'UPDATE_CONFIG', config: def.roleConfig })
+            setLoadOpen(false)
+        } catch (err) {
+            setListError(err instanceof Error ? err.message : 'Failed to load workflow')
+        }
+    }
+
     return (
         <div className="flex flex-col gap-8 w-full max-w-7xl h-screen mx-auto px-4 py-10">
 
             {/* ── Header ─────────────────────────────────────────────────────── */}
-            <div className="flex items-start justify-between">
+            <div className="flex items-start justify-between gap-4">
                 <div>
                     <h1 className="text-3xl font-bold text-white tracking-tight">
                         Invoice Approval Workflow
                     </h1>
                     <p className="text-sm text-gray-400 mt-1">
                         XState guards enforce role-based permissions.&nbsp;
-                        Approval requires <span className="text-white font-medium">{REQUIRED_VOTES}</span> of{' '}
+                        Approval requires <span className="text-white font-medium">{workflowDef.requiredVotes}</span> of{' '}
                         <span className="text-white font-medium">{eligibleVoters.length}</span> eligible voters.
                     </p>
                 </div>
-                <button
-                    onClick={() => setConfigOpen(o => !o)}
-                    className="mt-1 px-4 py-2 rounded-lg text-sm font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all"
-                >
-                    {configOpen ? 'Hide Config' : 'Configure Roles'}
-                </button>
+                <div className="flex items-center gap-2 mt-1 shrink-0">
+                    {/* Workflow name (inline edit) */}
+                    <input
+                        value={workflowName}
+                        onChange={e => setWorkflowName(e.target.value)}
+                        className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-violet-500 w-44"
+                        placeholder="Workflow name"
+                    />
+                    {/* Save */}
+                    <button
+                        onClick={handleSave}
+                        disabled={saveStatus === 'saving'}
+                        className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${saveStatus === 'saved' ? 'bg-green-700 text-white' :
+                                saveStatus === 'error' ? 'bg-red-800 text-white' :
+                                    saveStatus === 'saving' ? 'bg-gray-700 text-gray-400 cursor-not-allowed' :
+                                        'bg-violet-700 hover:bg-violet-600 text-white'
+                            }`}
+                    >
+                        {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'error' ? 'Error' : 'Save'}
+                    </button>
+                    {/* Load */}
+                    <button
+                        onClick={loadOpen ? () => setLoadOpen(false) : handleOpenLoad}
+                        className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all"
+                    >
+                        {loadOpen ? 'Close' : 'Load'}
+                    </button>
+                    {/* Configure roles */}
+                    <button
+                        onClick={() => setConfigOpen(o => !o)}
+                        className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:border-gray-500 transition-all"
+                    >
+                        {configOpen ? 'Hide Config' : 'Configure Roles'}
+                    </button>
+                </div>
             </div>
+
+            {/* ── Load panel ─────────────────────────────────────────────────── */}
+            {loadOpen && (
+                <div className="bg-gray-900 rounded-xl border border-gray-700 p-5">
+                    <p className="text-xs font-semibold uppercase tracking-widest text-gray-500 mb-3">
+                        Saved workflows
+                    </p>
+                    {listLoading && <p className="text-sm text-gray-500">Loading…</p>}
+                    {listError && <p className="text-sm text-red-400">{listError}</p>}
+                    {!listLoading && !listError && savedList.length === 0 && (
+                        <p className="text-sm text-gray-500">No saved workflows yet.</p>
+                    )}
+                    <div className="flex flex-col gap-2">
+                        {savedList.map(w => (
+                            <button
+                                key={w.id}
+                                onClick={() => handleLoadItem(w.id)}
+                                className="flex items-center justify-between px-4 py-2.5 rounded-lg bg-gray-800 border border-gray-700 hover:border-violet-500 transition-all text-left"
+                            >
+                                <span className="text-sm font-medium text-white">{w.name}</span>
+                                <span className="text-xs text-gray-500">
+                                    {new Date(w.updated_at).toLocaleString()}
+                                </span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {/* ── Role config panel ──────────────────────────────────────────── */}
             {configOpen && (
@@ -155,7 +276,7 @@ export default function InvoiceDemo() {
                 {(current === 'pending_review' || current === 'approved' || current === 'paid') && (
                     <div className="px-6 py-4">
                         <p className="text-xs text-gray-500 uppercase tracking-widest mb-3">
-                            Approval votes — {votes.length} / {REQUIRED_VOTES} required
+                            Approval votes — {votes.length} / {workflowDef.requiredVotes} required
                         </p>
                         <div className="flex gap-2 flex-wrap">
                             {eligibleVoters.map(u => (
@@ -240,7 +361,12 @@ export default function InvoiceDemo() {
                 <p className="text-xs text-gray-500 uppercase tracking-widest px-5 pt-4 pb-1">
                     State machine
                 </p>
-                <InvoiceFlowChart currentState={current} votes={votes} />
+                <InvoiceFlowChart
+                    currentState={current}
+                    votes={votes}
+                    definition={workflowDef}
+                    onPositionsChange={handlePositionsChange}
+                />
             </div>
         </div>
     )

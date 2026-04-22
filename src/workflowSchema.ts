@@ -1,6 +1,14 @@
-import { DEFAULT_ROLE_CONFIG, type RoleConfig } from './guards'
+import { DEFAULT_ROLE_CONFIG, type Role, type RoleConfig } from './guards'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+/** A named guard with optional description and role allowlist. */
+export interface GuardDefinition {
+    name: string
+    description?: string
+    /** Roles that satisfy this guard. Empty = no role restriction. */
+    allowedRoles?: Role[]
+}
 
 export interface WorkflowStateNode {
     id: string
@@ -31,6 +39,7 @@ export interface WorkflowDefinition {
     initialState: string
     requiredVotes: number
     roleConfig: RoleConfig
+    guardDefinitions: GuardDefinition[]
     states: WorkflowStateNode[]
     transitions: WorkflowTransition[]
     createdAt?: string
@@ -52,6 +61,13 @@ export const DEFAULT_WORKFLOW_DEFINITION: WorkflowDefinition = {
     initialState: 'draft',
     requiredVotes: 2,
     roleConfig: DEFAULT_ROLE_CONFIG,
+    guardDefinitions: [
+        { name: 'canSubmit', description: 'Only allowed submit roles may submit', allowedRoles: ['accountant'] },
+        { name: 'canVoteAndNotYet', description: 'Vote role, not yet voted, quorum not reached', allowedRoles: ['manager', 'cfo'] },
+        { name: 'canVoteAndReachesQuorum', description: 'Vote role, not yet voted, quorum reached', allowedRoles: ['manager', 'cfo'] },
+        { name: 'canReject', description: 'Only vote roles may reject', allowedRoles: ['manager', 'cfo'] },
+        { name: 'canPay', description: 'Only allowed pay roles may pay', allowedRoles: ['accountant'] },
+    ],
     states: [
         { id: 'draft', label: 'Draft', color: '#475569', isFinal: false, position: { x: 30, y: 80 } },
         { id: 'pending_review', label: 'Pending Review', color: '#b45309', isFinal: false, position: { x: 230, y: 80 } },

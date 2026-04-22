@@ -12,15 +12,12 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useCallback, useState } from 'react'
-import { saveWorkflow } from './api'
+import { getWorkflow, listWorkflows, saveWorkflow } from './api'
 import { DEFAULT_ROLE_CONFIG, ROLE_COLORS, ROLE_LABELS, type Role, type RoleConfig } from './guards'
-import type { WorkflowDefinition } from './workflowSchema'
+import type { GuardDefinition, WorkflowDefinition, WorkflowListItem } from './workflowSchema'
+import { DEFAULT_WORKFLOW_DEFINITION } from './workflowSchema'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-
-const AVAILABLE_GUARDS = [
-    'canSubmit', 'canVoteAndNotYet', 'canVoteAndReachesQuorum', 'canReject', 'canPay',
-] as const
 
 const AVAILABLE_ACTIONS = ['recordVote', 'clearVotes', 'updateConfig'] as const
 
@@ -143,8 +140,8 @@ function StateForm({ initial, isEditing, existingIds, onSubmit, onCancel }: {
 
 // ─── Transition form ──────────────────────────────────────────────────────────
 
-function TransitionForm({ initial, isEditing, stateIds, onSubmit, onCancel }: {
-    initial: TransitionFormValue; isEditing: boolean; stateIds: string[]
+function TransitionForm({ initial, isEditing, stateIds, availableGuards, onSubmit, onCancel }: {
+    initial: TransitionFormValue; isEditing: boolean; stateIds: string[]; availableGuards: string[]
     onSubmit: (v: TransitionFormValue) => void; onCancel: () => void
 }) {
     const [v, setV] = useState<TransitionFormValue>(initial)
@@ -197,7 +194,7 @@ function TransitionForm({ initial, isEditing, stateIds, onSubmit, onCancel }: {
                     <input list="guard-list" value={v.guard} onChange={e => set('guard', e.target.value)} placeholder="Guard name"
                         className="w-full px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-white focus:outline-none focus:border-violet-500" />
                     <datalist id="guard-list">
-                        {AVAILABLE_GUARDS.map(g => <option key={g} value={g} />)}
+                        {availableGuards.map(g => <option key={g} value={g} />)}
                     </datalist>
                 </div>
                 <div>
@@ -283,10 +280,17 @@ function Section({ title, children, action }: { title: string; children: React.R
 
 export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
     // ── Workflow metadata ──────────────────────────────────────────────────
+    const [workflowId, setWorkflowId] = useState<number | undefined>(undefined)
     const [wfName, setWfName] = useState('New Workflow')
     const [initialState, setInitialState] = useState('')
     const [requiredVotes, setRequiredVotes] = useState(2)
     const [roleConfig, setRoleConfig] = useState<RoleConfig>(DEFAULT_ROLE_CONFIG)
+    const [guardDefs, setGuardDefs] = useState<GuardDefinition[]>(DEFAULT_WORKFLOW_DEFINITION.guardDefinitions)
+
+    // ── Load panel state ──────────────────────────────────────────────────
+    const [loadPanelOpen, setLoadPanelOpen] = useState(false)
+    const [savedWorkflows, setSavedWorkflows] = useState<WorkflowListItem[]>([])
+    const [loadStatus, setLoadStatus] = useState<'idle' | 'loading' | 'error'>('idle')
 
     // ── XYFlow state ──────────────────────────────────────────────────────
     const [nodes, setNodes, onNodesChange] = useNodesState<StateNode>([])
@@ -420,6 +424,59 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
         style: buildNodeStyle(n.data.color, n.data.isFinal, n.id === selectedNodeId),
     }))
 
+    // ── Guard CRUD ────────────────────────────────────────────────────────
+    function addGuard() {
+        setGuardDefs(prev => [...prev, { name: 'newGuard', description: '' }])
+    }
+    function updateGuard(idx: number, patch: Partial<GuardDefinition>) {
+        setGuardDefs(prev => prev.map((g, i) => i === idx ? { ...g, ...patch } : g))
+    }
+    function deleteGuard(idx: number) {
+        setGuardDefs(prev => prev.filter((_, i) => i !== idx))
+    }
+
+    // ── Load workflow ─────────────────────────────────────────────────────
+    async function openLoadPanel() {
+        setLoadPanelOpen(true)
+        setLoadStatus('loading')
+        try {
+            const list = await listWorkflows()
+            setSavedWorkflows(list)
+            setLoadStatus('idle')
+        } catch {
+            setLoadStatus('error')
+        }
+    }
+
+    async function loadWorkflow(id: number) {
+        try {
+            const def = await getWorkflow(id)
+            setWorkflowId(def.id)
+            setWfName(def.name)
+            setInitialState(def.initialState)
+            setRequiredVotes(def.requiredVotes)
+            setRoleConfig(def.roleConfig)
+            setGuardDefs(def.guardDefinitions ?? DEFAULT_WORKFLOW_DEFINITION.guardDefinitions)
+            setNodes(def.states.map(s => ({
+                id: s.id,
+                position: s.position ?? { x: 80, y: 160 },
+                data: { label: s.label, color: s.color, isFinal: s.isFinal ?? false },
+                style: buildNodeStyle(s.color, s.isFinal ?? false, false),
+            })))
+            setEdges(def.transitions.map(t => ({
+                id: t.id, source: t.source, target: t.target, label: t.label,
+                animated: t.animated ?? true, type: t.type,
+                style: t.style, labelStyle: t.labelStyle,
+                data: { event: t.event, guard: t.guard ?? '', action: t.action },
+            })))
+            setSelectedNodeId(null)
+            setSelectedEdgeId(null)
+            setLoadPanelOpen(false)
+        } catch {
+            alert('Failed to load workflow.')
+        }
+    }
+
     // ── Save ──────────────────────────────────────────────────────────────
     async function handleSave() {
         if (nodes.length === 0) { alert('Add at least one state first.'); return }
@@ -427,10 +484,12 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
         setSaveStatus('saving')
         try {
             const def: WorkflowDefinition = {
+                ...(workflowId !== undefined ? { id: workflowId } : {}),
                 name: wfName,
                 initialState,
                 requiredVotes,
                 roleConfig,
+                guardDefinitions: guardDefs,
                 states: nodes.map(n => ({
                     id: n.id, label: n.data.label, color: n.data.color,
                     isFinal: n.data.isFinal, position: n.position,
@@ -446,7 +505,8 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
                         : undefined,
                 })),
             }
-            await saveWorkflow(def)
+            const saved = await saveWorkflow(def)
+            if (saved?.id) setWorkflowId(saved.id)
             setSaveStatus('saved')
             setTimeout(() => setSaveStatus('idle'), 2500)
         } catch {
@@ -476,17 +536,50 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
                     className="ml-1 px-3 py-1.5 rounded-lg text-sm bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:border-violet-500 w-56"
                     placeholder="Workflow name"
                 />
-                <div className="ml-auto">
+                {workflowId !== undefined && (
+                    <span className="text-xs text-violet-400 shrink-0">Editing #{workflowId}</span>
+                )}
+                <div className="ml-auto flex items-center gap-2">
+                    <div className="relative">
+                        <button
+                            onClick={loadPanelOpen ? () => setLoadPanelOpen(false) : openLoadPanel}
+                            className="px-4 py-1.5 rounded-lg text-sm font-medium bg-gray-700 hover:bg-gray-600 text-gray-200 transition-all"
+                        >
+                            Load Workflow
+                        </button>
+                        {loadPanelOpen && (
+                            <div className="absolute right-0 top-full mt-2 w-72 bg-gray-900 border border-gray-700 rounded-xl shadow-2xl z-50 overflow-hidden">
+                                <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                                    <span className="text-xs font-semibold uppercase tracking-widest text-gray-500">Saved Workflows</span>
+                                    <button onClick={() => setLoadPanelOpen(false)} className="text-gray-500 hover:text-white text-xs">✕</button>
+                                </div>
+                                <div className="max-h-72 overflow-y-auto">
+                                    {loadStatus === 'loading' && <p className="px-4 py-3 text-xs text-gray-500">Loading…</p>}
+                                    {loadStatus === 'error' && <p className="px-4 py-3 text-xs text-red-400">Failed to load list.</p>}
+                                    {loadStatus === 'idle' && savedWorkflows.length === 0 && (
+                                        <p className="px-4 py-3 text-xs text-gray-600 italic">No saved workflows yet.</p>
+                                    )}
+                                    {loadStatus === 'idle' && savedWorkflows.map(wf => (
+                                        <button key={wf.id} onClick={() => loadWorkflow(wf.id)}
+                                            className="w-full text-left px-4 py-3 hover:bg-gray-800 transition-colors border-b border-gray-800 last:border-0">
+                                            <p className="text-sm text-gray-200">{wf.name}</p>
+                                            <p className="text-xs text-gray-500">#{wf.id}</p>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
                     <button
                         onClick={handleSave}
                         disabled={saveStatus === 'saving'}
                         className={`px-5 py-1.5 rounded-lg text-sm font-medium transition-all ${saveStatus === 'saved' ? 'bg-green-700 text-white' :
-                                saveStatus === 'error' ? 'bg-red-800 text-white' :
-                                    saveStatus === 'saving' ? 'bg-gray-700 text-gray-400 cursor-not-allowed' :
-                                        'bg-violet-700 hover:bg-violet-600 text-white'
+                            saveStatus === 'error' ? 'bg-red-800 text-white' :
+                                saveStatus === 'saving' ? 'bg-gray-700 text-gray-400 cursor-not-allowed' :
+                                    'bg-violet-700 hover:bg-violet-600 text-white'
                             }`}
                     >
-                        {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'error' ? 'Error' : 'Save Workflow'}
+                        {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'error' ? 'Error' : workflowId !== undefined ? 'Update Workflow' : 'Save Workflow'}
                     </button>
                 </div>
             </div>
@@ -588,6 +681,38 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
                         }
                     </Section>
 
+                    {/* Guards */}
+                    <Section title={`Guards (${guardDefs.length})`} action={
+                        <button onClick={addGuard}
+                            className="text-xs px-2.5 py-1 rounded bg-violet-800 hover:bg-violet-700 text-white font-medium transition-colors">
+                            + Add
+                        </button>
+                    }>
+                        {guardDefs.length === 0
+                            ? <p className="text-xs text-gray-600 italic">No guards defined.</p>
+                            : (
+                                <div className="flex flex-col gap-2">
+                                    {guardDefs.map((g, idx) => (
+                                        <div key={idx} className="flex flex-col gap-1 px-2.5 py-2 rounded-lg border border-gray-800 bg-gray-950/40">
+                                            <div className="flex items-center gap-1">
+                                                <input value={g.name}
+                                                    onChange={e => updateGuard(idx, { name: e.target.value.replace(/\s+/g, '_') })}
+                                                    className="flex-1 min-w-0 px-2 py-1 rounded bg-gray-800 border border-gray-700 text-xs text-white font-mono focus:outline-none focus:border-violet-500"
+                                                    placeholder="guardName" />
+                                                <button onClick={() => deleteGuard(idx)}
+                                                    className="text-gray-500 hover:text-red-400 text-xs px-1 shrink-0" title="Delete">✕</button>
+                                            </div>
+                                            <input value={g.description ?? ''}
+                                                onChange={e => updateGuard(idx, { description: e.target.value })}
+                                                className="w-full px-2 py-1 rounded bg-gray-800 border border-gray-700 text-xs text-gray-400 focus:outline-none focus:border-violet-500"
+                                                placeholder="Description (optional)" />
+                                        </div>
+                                    ))}
+                                </div>
+                            )
+                        }
+                    </Section>
+
                     {/* Tip */}
                     <div className="px-4 py-4 mt-auto">
                         <p className="text-xs text-gray-600">
@@ -641,7 +766,7 @@ export default function WorkflowCreator({ onBack }: { onBack: () => void }) {
                 <Modal title={transModal.isEditing ? 'Edit Transition' : 'Add Transition'}
                     onClose={() => setTransModal(s => ({ ...s, open: false }))}>
                     <TransitionForm initial={transModal.form} isEditing={transModal.isEditing}
-                        stateIds={stateIds} onSubmit={submitTransition}
+                        stateIds={stateIds} availableGuards={guardDefs.map(g => g.name)} onSubmit={submitTransition}
                         onCancel={() => setTransModal(s => ({ ...s, open: false }))} />
                 </Modal>
             )}

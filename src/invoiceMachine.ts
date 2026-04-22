@@ -1,6 +1,5 @@
 import { assign, setup } from 'xstate'
 import {
-    DEFAULT_ROLE_CONFIG,
     hasAlreadyVoted,
     quorumReached,
     type Role,
@@ -27,13 +26,49 @@ export type InvoiceEvent =
     | (BaseEvent & { type: 'PAY' })
     | { type: 'UPDATE_CONFIG'; config: Partial<RoleConfig> }
 
+type GuardConfigKey = keyof RoleConfig
+
+type SerializableGuard =
+    | { type: 'hasRoleIn'; params: { configKey: GuardConfigKey } }
+    | { type: 'alreadyVoted' }
+    | { type: 'reachesRequiredVotes' }
+    | { type: 'vendorIs'; params: { vendor: string } }
+    | { type: 'allOf'; params: { guards: SerializableGuard[] } }
+    | { type: 'anyOf'; params: { guards: SerializableGuard[] } }
+    | { type: 'not'; params: { guard: SerializableGuard } }
+
 export const REQUIRED_VOTES = 2
 
+function evaluateSerializableGuard(
+    context: InvoiceContext,
+    event: InvoiceEvent,
+    guard: SerializableGuard,
+): boolean {
+    switch (guard.type) {
+        case 'hasRoleIn':
+            return 'role' in event && context.roleConfig[guard.params.configKey].includes(event.role)
+        case 'alreadyVoted':
+            return 'userId' in event && hasAlreadyVoted(context.votes, event.userId)
+        case 'reachesRequiredVotes':
+            return 'userId' in event && quorumReached(context.votes, event.userId, REQUIRED_VOTES)
+        case 'vendorIs':
+            return context.vendor === guard.params.vendor
+        case 'allOf':
+            return guard.params.guards.every(item => evaluateSerializableGuard(context, event, item))
+        case 'anyOf':
+            return guard.params.guards.some(item => evaluateSerializableGuard(context, event, item))
+        case 'not':
+            return !evaluateSerializableGuard(context, event, guard.params.guard)
+    }
+}
+
+// const loadedConfig = localStorage.getItem('invoiceRoleConfig')
+// console.log('Loaded role config from localStorage:', loadedConfig ? JSON.parse(loadedConfig) : null)
 // ─── Machine ──────────────────────────────────────────────────────────────────
 // Guards are named references that delegate to the pure functions in guards.ts.
 // This keeps the machine declaration declarative and the logic independently testable.
 
-export const invoiceMachine = setup({
+const machineSetup = setup({
     types: {
         context: {} as InvoiceContext,
         events: {} as InvoiceEvent,
@@ -41,31 +76,33 @@ export const invoiceMachine = setup({
     },
 
     guards: {
-        /** Draft → Pending Review: allowed roles configurable. */
-        canSubmit: ({ context, event }) =>
-            'role' in event && context.roleConfig.submitRoles.includes(event.role),
+        /** Generic role gate with params so createMachine can bind specific role groups. */
+        hasRoleIn: ({ context, event }, params: { configKey: GuardConfigKey }) =>
+            evaluateSerializableGuard(context, event, { type: 'hasRoleIn', params }),
 
-        /** Vote recorded but quorum not yet met. */
-        canVoteAndNotYet: ({ context, event }) =>
-            'role' in event &&
-            context.roleConfig.voteRoles.includes(event.role) &&
-            !hasAlreadyVoted(context.votes, event.userId) &&
-            !quorumReached(context.votes, event.userId, REQUIRED_VOTES),
+        /** True when the acting user has already voted. Useful with not(...). */
+        alreadyVoted: ({ context, event }) =>
+            evaluateSerializableGuard(context, event, { type: 'alreadyVoted' }),
 
-        /** Vote recorded AND quorum reached → transition to approved. */
-        canVoteAndReachesQuorum: ({ context, event }) =>
-            'role' in event &&
-            context.roleConfig.voteRoles.includes(event.role) &&
-            !hasAlreadyVoted(context.votes, event.userId) &&
-            quorumReached(context.votes, event.userId, REQUIRED_VOTES),
+        /** True when the next vote would satisfy quorum. */
+        reachesRequiredVotes: ({ context, event }) =>
+            evaluateSerializableGuard(context, event, { type: 'reachesRequiredVotes' }),
 
-        /** Pending Review → Draft: allowed roles configurable. */
-        canReject: ({ context, event }) =>
-            'role' in event && context.roleConfig.voteRoles.includes(event.role),
+        /** Tiny extra param guard only to illustrate or()/not() composition. */
+        vendorIs: ({ context }, params: { vendor: string }) =>
+            context.vendor === params.vendor,
 
-        /** Approved → Paid: allowed roles configurable. */
-        canPay: ({ context, event }) =>
-            'role' in event && context.roleConfig.payRoles.includes(event.role),
+        /** Serializable equivalent of and([...]). */
+        allOf: ({ context, event }, params: { guards: SerializableGuard[] }) =>
+            evaluateSerializableGuard(context, event, { type: 'allOf', params }),
+
+        /** Serializable equivalent of or([...]). */
+        anyOf: ({ context, event }, params: { guards: SerializableGuard[] }) =>
+            evaluateSerializableGuard(context, event, { type: 'anyOf', params }),
+
+        /** Serializable equivalent of not(...). */
+        not: ({ context, event }, params: { guard: SerializableGuard }) =>
+            evaluateSerializableGuard(context, event, { type: 'not', params }),
     },
 
     actions: {
@@ -81,45 +118,98 @@ export const invoiceMachine = setup({
                     : context.roleConfig,
         }),
     },
-
-}).createMachine({
-    id: 'invoice',
-    initial: 'draft',
-    context: ({ input }) => ({
-        invoiceId: 'INV-2026-0042',
-        amount: 4_850,
-        vendor: 'Acme Corp',
-        votes: [],
-        roleConfig: { ...DEFAULT_ROLE_CONFIG, ...input?.roleConfig },
-    }),
-    // UPDATE_CONFIG is accepted from any state without resetting the workflow.
-    on: {
-        UPDATE_CONFIG: { actions: 'updateConfig' },
-    },
-    states: {
-        draft: {
-            on: {
-                SUBMIT: { target: 'pending_review', guard: 'canSubmit' },
-            },
-        },
-
-        pending_review: {
-            on: {
-                // Ordered: check quorum-reaching first, otherwise just record the vote.
-                VOTE_APPROVE: [
-                    { target: 'approved', guard: 'canVoteAndReachesQuorum', actions: 'recordVote' },
-                    { guard: 'canVoteAndNotYet', actions: 'recordVote' },
-                ],
-                REJECT: { target: 'draft', guard: 'canReject', actions: 'clearVotes' },
-            },
-        },
-
-        approved: {
-            on: {
-                PAY: { target: 'paid', guard: 'canPay' },
-            },
-        },
-
-        paid: { type: 'final' },
-    },
 })
+
+const invoiceMachineConfig = {
+    "id": "invoice",
+    "initial": "draft",
+    "context": {
+        "invoiceId": "INV-2026-0042",
+        "amount": 4850,
+        "vendor": "Acme Corp",
+        "votes": [],
+        "roleConfig": { payRoles: ['accountant'], submitRoles: ['accountant'], voteRoles: ['manager', 'cfo'] },
+    },
+    "on": {
+        "UPDATE_CONFIG": {
+            "actions": "updateConfig"
+        }
+    },
+    "states": {
+        "draft": {
+            "on": {
+                "SUBMIT": {
+                    "target": "pending_review",
+                    "guard": {
+                        "type": "allOf",
+                        "params": {
+                            "guards": [
+                                { "type": "hasRoleIn", "params": { "configKey": "submitRoles" } },
+                                {
+                                    "type": "anyOf",
+                                    "params": {
+                                        "guards": [
+                                            { "type": "hasRoleIn", "params": { "configKey": "submitRoles" } },
+                                            { "type": "not", "params": { "guard": { "type": "vendorIs", "params": { "vendor": "Blocked Vendor" } } } }
+                                        ]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        "pending_review": {
+            "on": {
+                "VOTE_APPROVE": [
+                    {
+                        "target": "approved",
+                        "guard": {
+                            "type": "allOf",
+                            "params": {
+                                "guards": [
+                                    { "type": "hasRoleIn", "params": { "configKey": "voteRoles" } },
+                                    { "type": "not", "params": { "guard": { "type": "alreadyVoted" } } },
+                                    { "type": "reachesRequiredVotes" }
+                                ]
+                            }
+                        },
+                        "actions": "recordVote"
+                    },
+                    {
+                        "guard": {
+                            "type": "allOf",
+                            "params": {
+                                "guards": [
+                                    { "type": "hasRoleIn", "params": { "configKey": "voteRoles" } },
+                                    { "type": "not", "params": { "guard": { "type": "alreadyVoted" } } },
+                                    { "type": "not", "params": { "guard": { "type": "reachesRequiredVotes" } } }
+                                ]
+                            }
+                        },
+                        "actions": "recordVote"
+                    }
+                ],
+                "REJECT": {
+                    "target": "draft",
+                    "guard": { type: 'hasRoleIn', params: { configKey: 'voteRoles' as const } },
+                    "actions": "clearVotes"
+                }
+            }
+        },
+        "approved": {
+            "on": {
+                "PAY": {
+                    "target": "paid",
+                    "guard": { type: 'hasRoleIn', params: { configKey: 'payRoles' as const } }
+                }
+            }
+        },
+        "paid": {
+            "type": "final"
+        }
+    }
+} as Parameters<typeof machineSetup.createMachine>[0]
+
+export const invoiceMachine = machineSetup.createMachine(invoiceMachineConfig)

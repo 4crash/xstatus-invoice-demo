@@ -146,9 +146,9 @@ export default function InvoiceDemo() {
                         onClick={handleSave}
                         disabled={saveStatus === 'saving'}
                         className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${saveStatus === 'saved' ? 'bg-green-700 text-white' :
-                                saveStatus === 'error' ? 'bg-red-800 text-white' :
-                                    saveStatus === 'saving' ? 'bg-gray-700 text-gray-400 cursor-not-allowed' :
-                                        'bg-violet-700 hover:bg-violet-600 text-white'
+                            saveStatus === 'error' ? 'bg-red-800 text-white' :
+                                saveStatus === 'saving' ? 'bg-gray-700 text-gray-400 cursor-not-allowed' :
+                                    'bg-violet-700 hover:bg-violet-600 text-white'
                             }`}
                     >
                         {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? '✓ Saved' : saveStatus === 'error' ? 'Error' : 'Save'}
